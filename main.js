@@ -1,13 +1,11 @@
 // =================================================================================
-// VERSION 2.0 - ANTI-BYPASS UPDATE
+// VERSION 2.1 - API UPDATE
 // Update Log:
-// - Added Arolinks API Auto-Shortening
-// - Added 'Referer Check' to detect direct access (Bypass attempts)
-// - Added Custom "Bypass Rejected" Screen with funny message
-// - Improved Encryption Security
+// - Added specific API Constants (SHORT_BASE_1, SHORT_API_1)
+// - Updated Anti-Bypass to automatically detect domain from SHORT_BASE_1
 // =================================================================================
 
-// --- CONFIGURATION (Ise dhyan se bharein) ---
+// --- CONFIGURATION ---
 
 // 1. Admin Password (Link create karne ke liye)
 const ADMIN_PASSWORD = "MY_SECRET_PASS_123"; 
@@ -15,14 +13,14 @@ const ADMIN_PASSWORD = "MY_SECRET_PASS_123";
 // 2. Encryption Key (Koi bhi random text)
 const SECRET_KEY = "SUPER_SECRET_KEY_XY"; 
 
-// 3. AROLINKS API TOKEN (Apni Key yahan dalein)
-const AROLINKS_API_TOKEN = "YOUR_AROLINKS_API_KEY_HERE"; 
+// 3. SHORTENER CONFIGURATION (Updated)
+const SHORT_BASE_1 = 'https://arolinks.com';
+const SHORT_API_1  = '323541e90e99d3646f3f78e3d09fb14343239f5a';
 
-// 4. SHORTENER DOMAIN (Jahan se user aayega)
-// Important: Yahan wo domain likhe jahan se user redirect hokar aayega.
-// Agar Arolinks use kar rahe ho, toh usually 'arolinks.com' hota hai.
-// Agar sure nahi ho, toh ise "SKIP" likh dena (Security off ho jayegi).
-const ALLOWED_REFERER = "arolinks.com"; 
+// 4. SECURITY CONFIG (Auto-derived)
+// Ye automatically 'arolinks.com' nikal lega SHORT_BASE_1 se.
+// Agar security off karni ho to ise manually "SKIP" kar dein.
+const ALLOWED_REFERER = new URL(SHORT_BASE_1).hostname; 
 
 // =================================================================================
 
@@ -53,15 +51,16 @@ export default {
       // Ye wo link hai jo Arolinks ke andar jayega
       const safeWorkerLink = `${url.origin}/redirect?token=${encodeURIComponent(encrypted)}`;
 
-      // 2. Call Arolinks API
+      // 2. Call Shortener API
       try {
-        const apiUrl = `https://arolinks.com/api?api=${AROLINKS_API_TOKEN}&url=${encodeURIComponent(safeWorkerLink)}`;
+        // Updated to use new constants
+        const apiUrl = `${SHORT_BASE_1}/api?api=${SHORT_API_1}&url=${encodeURIComponent(safeWorkerLink)}`;
         
         const apiResponse = await fetch(apiUrl);
         const result = await apiResponse.json();
 
         if (result.status === "error") {
-          return new Response(JSON.stringify({ status: "error", msg: "Arolinks Error: " + result.message }), { status: 500 });
+          return new Response(JSON.stringify({ status: "error", msg: "Shortener Error: " + result.message }), { status: 500 });
         }
 
         // Success Response
@@ -73,7 +72,7 @@ export default {
         }, null, 2), { headers: { "Content-Type": "application/json" } });
 
       } catch (e) {
-        return new Response(JSON.stringify({ status: "error", msg: "API Error. Check API Key." }), { status: 500 });
+        return new Response(JSON.stringify({ status: "error", msg: "API Error. Check connection." }), { status: 500 });
       }
     }
 
@@ -93,14 +92,8 @@ export default {
       
       // Agar Referer set hai (SKIP nahi hai) aur Referer match nahi kar raha
       if (ALLOWED_REFERER !== "SKIP") {
-        // Hum check kar rahe hai ki kya user Allowed Domain se aaya hai?
-        // Note: Kuch legitimate browsers privacy ke liye referer hide karte hain, 
-        // lekin bypass scripts aksar ise empty rakhti hain.
         
-        const isSuspicious = !referer.includes(ALLOWED_REFERER) && referer !== ""; 
-        // (Is logic ko strict banane ke liye `&& referer !== ""` hata sakte ho, par usse kuch real users block ho sakte hain)
-
-        // Strict Check: Agar Referer bilkul gayab hai (Direct Copy Paste)
+        // Strict Check: Agar Referer bilkul gayab hai ya match nahi karta
         if (referer === "" || !referer.includes(ALLOWED_REFERER)) {
            // BYPASS DETECTED!
            return new Response(renderRejectHtml(), {
@@ -131,7 +124,7 @@ export default {
     }
 
     // Default Page
-    return new Response("Link Guard v2.0 System Online 🟢", { status: 200 });
+    return new Response("Link Guard v2.1 System Online 🟢", { status: 200 });
   },
 };
 
