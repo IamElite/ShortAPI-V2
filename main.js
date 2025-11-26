@@ -1,26 +1,41 @@
 // =================================================================================
-// VERSION 2.1 - API UPDATE
+// VERSION 2.2 - UNIVERSAL SHORTENER SUPPORT
 // Update Log:
-// - Added specific API Constants (SHORT_BASE_1, SHORT_API_1)
-// - Updated Anti-Bypass to automatically detect domain from SHORT_BASE_1
+// - Fixed "Missing https" crash issue.
+// - Now supports ANY AdLinkFly based shortener (Nanolinks, GPlinks, Droplink etc).
+// - Added Auto-Protocol detection (http/https).
 // =================================================================================
 
-// --- CONFIGURATION ---
+// --- CONFIGURATION (EDIT HERE) ---
 
-// 1. Admin Password (Link create karne ke liye)
+// 1. Admin Password
 const ADMIN_PASSWORD = "MY_SECRET_PASS_123"; 
 
-// 2. Encryption Key (Koi bhi random text)
+// 2. Encryption Key
 const SECRET_KEY = "SUPER_SECRET_KEY_XY"; 
 
-// 3. SHORTENER CONFIGURATION (Updated)
-const SHORT_BASE_1 = 'nanolinks.in';
-const SHORT_API_1  = 'ae0271c2c57105db2fa209f5b0f20c1a965343f6';
+// 3. SHORTENER CONFIGURATION (Universal)
+// Yahan apne shortener ki website dalein (e.g., nanolinks.in, gplinks.com)
+// Https lagana bhool bhi gaye to code khud laga lega.
+const SHORTENER_DOMAIN = 'nanolinks.in'; 
+const SHORTENER_API_KEY = 'ae0271c2c57105db2fa209f5b0f20c1a965343f6';
 
-// 4. SECURITY CONFIG (Auto-derived)
-// Ye automatically 'arolinks.com' nikal lega SHORT_BASE_1 se.
-// Agar security off karni ho to ise manually "SKIP" kar dein.
-const ALLOWED_REFERER = new URL(SHORT_BASE_1).hostname; 
+// 4. SECURITY CONFIG (Auto-derived - DO NOT TOUCH)
+// Ye automatically domain nikal lega aur https fix kar lega.
+const getFixedBaseUrl = () => {
+    let url = SHORTENER_DOMAIN.trim();
+    if (!url.startsWith("http")) {
+        url = "https://" + url;
+    }
+    // Remove trailing slash if exists
+    if (url.endsWith("/")) {
+        url = url.slice(0, -1);
+    }
+    return url;
+};
+
+const BASE_URL = getFixedBaseUrl(); // https://nanolinks.in
+const ALLOWED_REFERER = new URL(BASE_URL).hostname; // nanolinks.in
 
 // =================================================================================
 
@@ -32,7 +47,6 @@ export default {
 
     // -----------------------------------------------------------------
     // CASE 1: LINK GENERATE KARNA (ADMIN SIDE)
-    // URL: /encrypt?pass=PASSWORD&url=YOUR_LINK
     // -----------------------------------------------------------------
     if (path === "/encrypt") {
       const originalUrl = url.searchParams.get("url");
@@ -48,19 +62,23 @@ export default {
 
       // 1. Encrypt URL
       const encrypted = xorEncrypt(originalUrl, SECRET_KEY);
-      // Ye wo link hai jo Arolinks ke andar jayega
       const safeWorkerLink = `${url.origin}/redirect?token=${encodeURIComponent(encrypted)}`;
 
-      // 2. Call Shortener API
+      // 2. Call Shortener API (Generic Format)
       try {
-        // Updated to use new constants
-        const apiUrl = `${SHORT_BASE_1}/api?api=${SHORT_API_1}&url=${encodeURIComponent(safeWorkerLink)}`;
+        // Format: https://domain.com/api?api=KEY&url=URL
+        const apiUrl = `${BASE_URL}/api?api=${SHORTENER_API_KEY}&url=${encodeURIComponent(safeWorkerLink)}`;
         
         const apiResponse = await fetch(apiUrl);
         const result = await apiResponse.json();
 
-        if (result.status === "error") {
-          return new Response(JSON.stringify({ status: "error", msg: "Shortener Error: " + result.message }), { status: 500 });
+        // Check for specific shortener errors
+        if (result.status === "error" || (result.status && result.status !== "success")) {
+          return new Response(JSON.stringify({ 
+              status: "error", 
+              msg: `Shortener rejected request: ${result.message || 'Unknown Error'}`,
+              debug_url: BASE_URL 
+          }), { status: 500 });
         }
 
         // Success Response
@@ -68,17 +86,20 @@ export default {
           status: "success",
           original: originalUrl,
           protected_link: safeWorkerLink,
-          final_short_link: result.shortenedUrl // <-- Share THIS with users
+          final_short_link: result.shortenedUrl // <-- Share THIS
         }, null, 2), { headers: { "Content-Type": "application/json" } });
 
       } catch (e) {
-        return new Response(JSON.stringify({ status: "error", msg: "API Error. Check connection." }), { status: 500 });
+        return new Response(JSON.stringify({ 
+            status: "error", 
+            msg: `API Connection Failed. Check Domain/Key. Error: ${e.message}`,
+            debug_domain: BASE_URL
+        }), { status: 500 });
       }
     }
 
     // -----------------------------------------------------------------
     // CASE 2: USER REDIRECT (PUBLIC SIDE)
-    // URL: /redirect?token=XYZ...
     // -----------------------------------------------------------------
     if (path === "/redirect") {
       const token = url.searchParams.get("token");
@@ -90,12 +111,12 @@ export default {
       // --- ANTI-BYPASS CHECK START ---
       const referer = requestHeaders.get('Referer') || "";
       
-      // Agar Referer set hai (SKIP nahi hai) aur Referer match nahi kar raha
+      // Agar Referer set hai (SKIP nahi hai)
       if (ALLOWED_REFERER !== "SKIP") {
         
         // Strict Check: Agar Referer bilkul gayab hai ya match nahi karta
+        // Hum check kar rahe hain ki Referer me 'nanolinks.in' (ya jo bhi set hai) wo मौजूद hai ya nahi
         if (referer === "" || !referer.includes(ALLOWED_REFERER)) {
-           // BYPASS DETECTED!
            return new Response(renderRejectHtml(), {
              headers: { "Content-Type": "text/html;charset=UTF-8" },
            });
@@ -124,7 +145,7 @@ export default {
     }
 
     // Default Page
-    return new Response("Link Guard v2.1 System Online 🟢", { status: 200 });
+    return new Response("Link Guard v2.2 (Universal) Online 🟢", { status: 200 });
   },
 };
 
