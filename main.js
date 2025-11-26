@@ -14,8 +14,8 @@ const ADMIN_PASSWORD = "MY_SECRET_PASS_123";
 const SECRET_KEY = "SUPER_SECRET_KEY_XY"; 
 
 // 3. SHORTENER CONFIGURATION (Updated)
-const SHORT_BASE_1 = 'https://arolinks.com';
-const SHORT_API_1  = '323541e90e99d3646f3f78e3d09fb14343239f5a';
+const SHORT_BASE_1 = 'nanolinks.in';
+const SHORT_API_1  = 'ae0271c2c57105db2fa209f5b0f20c1a965343f6';
 
 // 4. SECURITY CONFIG (Auto-derived)
 // Ye automatically 'arolinks.com' nikal lega SHORT_BASE_1 se.
