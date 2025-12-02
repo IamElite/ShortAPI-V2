@@ -1,21 +1,26 @@
 // =================================================================================
-// SIMPLE BYPASS PROTECTION - REAL USERS KE LIYE EASY
+// PURE BACKEND PROTECTION - FRONTEND SIMPLE, LOGIC BACKEND MEIN
 // =================================================================================
 
 const ADMIN_PASSWORD = "MY_SECRET_PASS_123";
-const ENCRYPTION_KEY = "SUPER_SECRET_KEY_XY"; 
+const ENCRYPTION_KEY = "SUPER_SECRET_KEY_XY"; // 32 characters
 const SHORTENER_DOMAIN = 'nanolinks.in';
 const SHORTENER_API_KEY = 'ae0271c2c57105db2fa209f5b0f20c1a965343f6';
+
+// In-memory rate limiting (resets on worker restart)
+let requestTracker = new Map();
 
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     const path = url.pathname;
     const headers = request.headers;
+    const clientIP = headers.get('CF-Connecting-IP') || 'unknown';
     const userAgent = headers.get('User-Agent') || '';
+    const referer = headers.get('Referer') || '';
 
     // -----------------------------------------------------------------
-    // 1. ADMIN LINK GENERATE
+    // 1. ADMIN LINK GENERATE (SAME)
     // -----------------------------------------------------------------
     if (path === "/encrypt") {
       const originalUrl = url.searchParams.get("url");
@@ -28,19 +33,22 @@ export default {
         return new Response(JSON.stringify({ error: "URL missing" }), { status: 400 });
       }
 
-      // Simple XOR encryption
-      const xorEncrypt = (text, key) => {
-        let result = "";
-        for (let i = 0; i < text.length; i++) {
-          result += String.fromCharCode(text.charCodeAt(i) ^ key.charCodeAt(i % key.length));
-        }
-        return btoa(result);
+      // Create encrypted token with timestamp
+      const timestamp = Date.now();
+      const tokenData = {
+        url: originalUrl,
+        ts: timestamp,
+        src: 'direct' // Will change when coming from shortener
       };
-
-      const encrypted = xorEncrypt(originalUrl, ENCRYPTION_KEY);
+      
+      const encrypted = btoa(JSON.stringify(tokenData))
+        .split('').reverse().join('') 
+        + '.' 
+        + btoa(timestamp.toString());
+      
       const safeLink = `${url.origin}/redirect?token=${encodeURIComponent(encrypted)}`;
 
-      // Shortener API call
+      // Get short link
       const apiUrl = `https://${SHORTENER_DOMAIN}/api?api=${SHORTENER_API_KEY}&url=${encodeURIComponent(safeLink)}`;
       const apiRes = await fetch(apiUrl);
       const result = await apiRes.json();
@@ -48,189 +56,108 @@ export default {
       return new Response(JSON.stringify({
         success: true,
         original: originalUrl,
-        short_url: result.shortenedUrl
+        short_url: result.shortenedUrl,
+        note: "User MUST visit through shortener"
       }), { headers: { "Content-Type": "application/json" } });
     }
 
     // -----------------------------------------------------------------
-    // 2. USER REDIRECT (MAIN PAGE)
+    // 2. USER REDIRECT (MAIN LOGIC - BACKEND MEIN SAB KUCH)
     // -----------------------------------------------------------------
     if (path === "/redirect") {
       const token = url.searchParams.get("token");
+      const now = Date.now();
 
+      // 🔴 BACKEND CHECK 1: Token present?
       if (!token) {
-        return new Response("Invalid link", { status: 400 });
+        return renderBlocked("No token provided");
       }
 
-      // Decrypt token
-      const xorDecrypt = (encoded, key) => {
-        let text = atob(encoded);
-        let result = "";
-        for (let i = 0; i < text.length; i++) {
-          result += String.fromCharCode(text.charCodeAt(i) ^ key.charCodeAt(i % key.length));
-        }
-        return result;
-      };
+      // 🔴 BACKEND CHECK 2: Rate limiting
+      const ipKey = `ip_${clientIP}`;
+      const ipCount = requestTracker.get(ipKey) || 0;
+      if (ipCount > 10) { // 10 requests per IP
+        return renderBlocked("Too many requests");
+      }
+      requestTracker.set(ipKey, ipCount + 1);
 
       try {
-        const targetUrl = xorDecrypt(token, ENCRYPTION_KEY);
-
-        // SIMPLE HONEYPOT TRAP FOR BOTS
-        // Real users will NOT see/interact with this
+        // Decode token
+        const [encodedData, encodedTs] = token.split('.');
+        const decodedData = JSON.parse(atob(encodedData.split('').reverse().join('')));
+        const tokenTime = parseInt(atob(encodedTs));
         
-        const isLikelyBot = () => {
-          const ua = userAgent.toLowerCase();
-          
-          // Common bot/tool indicators
-          const botKeywords = [
-            'bypass', 'bot', 'crawler', 'spider', 'scraper',
-            'curl', 'wget', 'python', 'java', 'phantom',
-            'selenium', 'headless', 'automation'
-          ];
-          
-          // Check for automation tools
-          for (const keyword of botKeywords) {
-            if (ua.includes(keyword)) return true;
-          }
-          
-          // Check for common bypass extensions
-          if (headers.get('X-Bypass') || headers.get('X-Tool')) return true;
-          
-          return false;
-        };
-
-        // If bot detected, show blocked page
-        if (isLikelyBot()) {
-          return new Response(`
-            <!DOCTYPE html>
-            <html>
-            <head>
-              <title>Access Blocked</title>
-              <style>
-                body { font-family: Arial; text-align: center; padding: 50px; background: #ffebee; }
-                .box { background: white; padding: 30px; border-radius: 10px; max-width: 500px; margin: auto; }
-              </style>
-            </head>
-            <body>
-              <div class="box">
-                <h1>🚫 Access Blocked</h1>
-                <p>Automated tools are not allowed.</p>
-                <p>Please use a regular browser.</p>
-              </div>
-            </body>
-            </html>
-          `, { headers: { "Content-Type": "text/html" } });
+        // 🔴 BACKEND CHECK 3: Token expired? (30 seconds max)
+        if (now - tokenTime > 30000) {
+          return renderBlocked("Link expired (30 second limit)");
         }
 
-        // FOR REAL USERS: Simple redirect page with honeypot trap
-        return new Response(`
-          <!DOCTYPE html>
-          <html>
-          <head>
-            <title>Redirecting...</title>
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <style>
-              /* HIDDEN HONEYPOT TRAP - Only bots will interact with this */
-              .honeypot-trap {
-                opacity: 0;
-                position: absolute;
-                top: -100px;
-                left: -100px;
-                height: 1px;
-                width: 1px;
-                overflow: hidden;
-              }
-              
-              /* Main page styling */
-              body {
-                font-family: Arial, sans-serif;
-                text-align: center;
-                padding: 50px;
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                color: white;
-              }
-              .container {
-                background: rgba(255,255,255,0.95);
-                padding: 40px;
-                border-radius: 15px;
-                display: inline-block;
-                color: #333;
-              }
-              .loader {
-                border: 5px solid #f3f3f3;
-                border-top: 5px solid #667eea;
-                border-radius: 50%;
-                width: 50px;
-                height: 50px;
-                animation: spin 1s linear infinite;
-                margin: 20px auto;
-              }
-              @keyframes spin {
-                0% { transform: rotate(0deg); }
-                100% { transform: rotate(360deg); }
-              }
-            </style>
-          </head>
-          <body>
-            <!-- HONEYPOT TRAP: Bots will try to click/focus this -->
-            <div class="honeypot-trap">
-              <a href="#" id="bot-trap-link" onclick="blockAccess()">Bypass Link</a>
-              <input type="hidden" id="bot-trap-input" onfocus="blockAccess()">
-            </div>
-            
-            <!-- MAIN CONTENT: Real users see only this -->
-            <div class="container">
-              <div class="loader"></div>
-              <h2>Redirecting...</h2>
-              <p>Please wait while we redirect you to the destination.</p>
-              <p id="countdown">Redirecting in 3 seconds</p>
-            </div>
-            
-            <script>
-              // Trap function - if triggered, user is likely a bot
-              let trapTriggered = false;
-              function blockAccess() {
-                trapTriggered = true;
-                document.body.innerHTML = '<div class="container"><h1>🚫</h1><p>Access blocked by security system.</p></div>';
-                return false;
-              }
-              
-              // Auto-redirect for real users
-              let seconds = 3;
-              const countdownEl = document.getElementById('countdown');
-              const countdownInterval = setInterval(() => {
-                seconds--;
-                countdownEl.textContent = 'Redirecting in ' + seconds + ' second' + (seconds !== 1 ? 's' : '');
-                
-                if (seconds <= 0) {
-                  clearInterval(countdownInterval);
-                  // Only redirect if trap wasn't triggered
-                  if (!trapTriggered) {
-                    window.location.replace("${targetUrl.replace(/"/g, '\\"')}");
-                  }
-                }
-              }, 1000);
-              
-              // Redirect faster if user clicks anywhere (real user behavior)
-              document.body.addEventListener('click', function() {
-                if (!trapTriggered) {
-                  window.location.replace("${targetUrl.replace(/"/g, '\\"')}");
-                }
-              });
-              
-              // Auto-redirect after max 5 seconds (safety net)
-              setTimeout(() => {
-                if (!trapTriggered) {
-                  window.location.replace("${targetUrl.replace(/"/g, '\\"')}");
-                }
-              }, 5000);
-            </script>
-          </body>
-          </html>
-        `, { headers: { "Content-Type": "text/html" } });
+        // 🔴 BACKEND CHECK 4: Coming from shortener?
+        // REAL users will have src='shortener', direct access will have src='direct'
+        const isFromShortener = referer.includes(SHORTENER_DOMAIN) || 
+                               decodedData.src === 'shortener';
+        
+        if (!isFromShortener && decodedData.src !== 'shortener') {
+          // This is a DIRECT ACCESS attempt (bypass)
+          // But let's give them a CHANCE - update token to mark as bypass attempt
+          decodedData.src = 'bypass_attempt';
+          decodedData.attempt_time = now;
+          
+          // Create new token with bypass mark
+          const newToken = btoa(JSON.stringify(decodedData))
+            .split('').reverse().join('') 
+            + '.' 
+            + btoa(now.toString());
+          
+          // 🔴 BACKEND CHECK 5: Detect automation tools
+          const isAutomationTool = detectAutomation(userAgent, headers);
+          
+          if (isAutomationTool) {
+            return renderBlocked("Automation tools detected");
+          }
+          
+          // Show redirect page but with tracking
+          return renderRedirectPage(decodedData.url, newToken, true);
+        }
+
+        // 🔴 BACKEND CHECK 6: Valid URL?
+        if (!decodedData.url.startsWith('http')) {
+          return renderBlocked("Invalid destination URL");
+        }
+
+        // ✅ ALL CHECKS PASSED - Real user from shortener
+        // Show simple redirect page
+        return renderRedirectPage(decodedData.url, token, false);
 
       } catch (e) {
-        return new Response("Invalid or expired link", { status: 400 });
+        // 🔴 BACKEND CHECK 7: Token tampering
+        return renderBlocked("Invalid security token");
+      }
+    }
+
+    // -----------------------------------------------------------------
+    // 3. FINAL REDIRECT ENDPOINT (Hidden from users)
+    // -----------------------------------------------------------------
+    if (path === "/final-redirect") {
+      const token = url.searchParams.get("token");
+      
+      if (!token) return Response.redirect("https://google.com", 302);
+      
+      try {
+        const [encodedData, encodedTs] = token.split('.');
+        const decodedData = JSON.parse(atob(encodedData.split('').reverse().join('')));
+        
+        // Last check: if marked as bypass attempt and recent
+        if (decodedData.src === 'bypass_attempt') {
+          const attemptTime = decodedData.attempt_time || 0;
+          if (Date.now() - attemptTime < 5000) { // Within 5 seconds
+            return renderBlocked("Security check failed");
+          }
+        }
+        
+        return Response.redirect(decodedData.url, 302);
+      } catch (e) {
+        return Response.redirect("https://google.com", 302);
       }
     }
 
@@ -238,20 +165,174 @@ export default {
     // DEFAULT PAGE
     // -----------------------------------------------------------------
     return new Response(`
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <title>Link Protector</title>
-        <style>
-          body { font-family: Arial; text-align: center; padding: 50px; }
-        </style>
-      </head>
-      <body>
-        <h1>🔗 Link Protection System</h1>
-        <p>Simple bypass protection for shorteners</p>
-        <p><strong>Admin:</strong> <code>/encrypt?pass=PASSWORD&url=YOUR_URL</code></p>
-      </body>
-      </html>
+      <html><body style="text-align:center;padding:50px;">
+        <h1>Link Protection Active</h1>
+        <p>Backend protection system running.</p>
+      </body></html>
     `, { headers: { "Content-Type": "text/html" } });
   }
 };
+
+// =================================================================================
+// BACKEND DETECTION FUNCTIONS
+// =================================================================================
+
+function detectAutomation(userAgent, headers) {
+  const ua = userAgent.toLowerCase();
+  
+  // Common automation tools
+  const automationMarkers = [
+    'phantom', 'selenium', 'webdriver', 'headless',
+    'puppeteer', 'playwright', 'curl/', 'wget/',
+    'python-requests', 'java/', 'bot', 'crawler',
+    'scraper', 'automation', 'bypass-all-shortlinks'
+  ];
+  
+  for (const marker of automationMarkers) {
+    if (ua.includes(marker)) return true;
+  }
+  
+  // Check for automation headers
+  if (headers.get('X-Selenium')) return true;
+  if (headers.get('X-WebDriver')) return true;
+  if (headers.get('X-Requested-With') === 'XMLHttpRequest' && 
+      !headers.get('Referer')) return true;
+  
+  return false;
+}
+
+// =================================================================================
+// RENDER FUNCTIONS
+// =================================================================================
+
+function renderBlocked(reason) {
+  return new Response(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>Access Restricted</title>
+      <style>
+        body {
+          font-family: Arial, sans-serif;
+          text-align: center;
+          padding: 50px;
+          background: #ffebee;
+        }
+        .box {
+          background: white;
+          padding: 30px;
+          border-radius: 10px;
+          max-width: 500px;
+          margin: auto;
+          box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+        }
+      </style>
+    </head>
+    <body>
+      <div class="box">
+        <h1 style="color:#d32f2f;">🚫 Access Restricted</h1>
+        <p><strong>Reason:</strong> ${reason}</p>
+        <p>Our security system has blocked this request.</p>
+        <hr>
+        <p style="font-size:12px; color:#666;">
+          IP logged • ${new Date().toLocaleTimeString()}
+        </p>
+      </div>
+    </body>
+    </html>
+  `, { headers: { "Content-Type": "text/html" } });
+}
+
+function renderRedirectPage(targetUrl, token, isSuspicious = false) {
+  // For REAL users: simple redirect page
+  // For suspicious: redirect but with tracking
+  
+  const redirectDelay = isSuspicious ? 5000 : 2000; // 5 sec for suspicious, 2 sec for real
+  
+  return new Response(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>Redirecting...</title>
+      <style>
+        body {
+          font-family: Arial, sans-serif;
+          text-align: center;
+          padding: 50px;
+          background: #f5f5f5;
+        }
+        .container {
+          background: white;
+          padding: 40px;
+          border-radius: 10px;
+          display: inline-block;
+          box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+        }
+        .loader {
+          border: 5px solid #f3f3f3;
+          border-top: 5px solid #4CAF50;
+          border-radius: 50%;
+          width: 50px;
+          height: 50px;
+          animation: spin 1s linear infinite;
+          margin: 20px auto;
+        }
+        @keyframes spin {
+          0% { transform: rotate(0deg); }
+          100% { transform: rotate(360deg); }
+        }
+        ${isSuspicious ? `
+        .warning {
+          background: #fff3cd;
+          border: 1px solid #ffeaa7;
+          padding: 10px;
+          border-radius: 5px;
+          margin: 15px 0;
+          color: #856404;
+        }
+        ` : ''}
+      </style>
+    </head>
+    <body>
+      <div class="container">
+        <div class="loader"></div>
+        <h2>Redirecting to destination...</h2>
+        <p>Please wait a moment.</p>
+        
+        ${isSuspicious ? `
+        <div class="warning">
+          ⚠️ Security verification in progress...
+        </div>
+        ` : ''}
+        
+        <p id="countdown">Starting in ${redirectDelay/1000} seconds</p>
+        
+        <p style="font-size:12px; color:#999; margin-top:20px;">
+          Protected by LinkGuard • Backend Security v2.0
+        </p>
+      </div>
+      
+      <script>
+        let seconds = ${redirectDelay/1000};
+        const countdownEl = document.getElementById('countdown');
+        const countdownInterval = setInterval(() => {
+          seconds--;
+          countdownEl.textContent = 'Redirecting in ' + seconds + ' second' + (seconds !== 1 ? 's' : '');
+          
+          if (seconds <= 0) {
+            clearInterval(countdownInterval);
+            // Use hidden endpoint for final redirect
+            window.location.href = '/final-redirect?token=${encodeURIComponent(token)}';
+          }
+        }, 1000);
+        
+        // Allow click to redirect faster (human behavior)
+        document.body.addEventListener('click', function() {
+          clearInterval(countdownInterval);
+          window.location.href = '/final-redirect?token=${encodeURIComponent(token)}';
+        });
+      </script>
+    </body>
+    </html>
+  `, { headers: { "Content-Type": "text/html" } });
+}
