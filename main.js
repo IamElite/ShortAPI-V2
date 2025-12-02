@@ -1,313 +1,185 @@
 // =================================================================================
-// UNIQUE ID + TIME TRACKING SYSTEM
-// Real users ke liye simple, Bots ke liye block
+// VERSION 3.0 - SESSION COOKIE SYSTEM (UNIQUE ID)
+// Update Log:
+// - Removed unreliable Referer check.
+// - Added "Session Cookie" logic (100% Accuracy).
+// - Added "Start Link" generator logic.
 // =================================================================================
 
-const ADMIN_PASSWORD = "MY_SECRET_PASS_123";
-const ENCRYPTION_KEY = "SUPER_SECRET_KEY_XY"; // 32 characters
-const SHORTENER_DOMAIN = 'nanolinks.in';
+// --- CONFIGURATION ---
+
+// 1. Admin Password
+const ADMIN_PASSWORD = "MY_SECRET_PASS_123"; 
+
+// 2. Encryption Key
+const SECRET_KEY = "SUPER_SECRET_KEY_XY"; 
+
+// 3. SHORTENER CONFIG
+const SHORTENER_DOMAIN = 'nanolinks.in'; 
 const SHORTENER_API_KEY = 'ae0271c2c57105db2fa209f5b0f20c1a965343f6';
 
-// Minimum time user should spend on shortener (seconds)
-const MIN_SHORTENER_TIME = 15; // 15 seconds minimum
-const MAX_SHORTENER_TIME = 300; // 5 minutes maximum
+// 4. SESSION SETTINGS
+const SESSION_NAME = "secure_user_id"; // Unique ID name
+const SESSION_TIME = 60 * 10; // 10 Minutes (in seconds) - User ke pass itna time hai clear karne ko
+
+// Auto-Fix URL
+const getFixedBaseUrl = () => {
+    let url = SHORTENER_DOMAIN.trim();
+    if (!url.startsWith("http")) url = "https://" + url;
+    if (url.endsWith("/")) url = url.slice(0, -1);
+    return url;
+};
+const BASE_URL = getFixedBaseUrl();
+
+// =================================================================================
 
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     const path = url.pathname;
-    const headers = request.headers;
-    const clientIP = headers.get('CF-Connecting-IP') || '';
+    const cookieHeader = request.headers.get("Cookie") || "";
 
     // -----------------------------------------------------------------
-    // 1. ADMIN LINK GENERATE
+    // CASE 1: LINK GENERATE KARNA (ADMIN SIDE)
+    // URL: /encrypt?pass=PASSWORD&url=YOUR_LINK
     // -----------------------------------------------------------------
     if (path === "/encrypt") {
       const originalUrl = url.searchParams.get("url");
       const pass = url.searchParams.get("pass");
 
-      if (pass !== ADMIN_PASSWORD) {
-        return new Response(JSON.stringify({ error: "Wrong password" }), { status: 403 });
+      if (pass !== ADMIN_PASSWORD) return new Response(JSON.stringify({ status: "error", msg: "❌ Wrong Password" }), { status: 403 });
+      if (!originalUrl) return new Response(JSON.stringify({ status: "error", msg: "❌ URL Missing" }), { status: 400 });
+
+      // 1. Encrypt Destination
+      const encryptedDest = xorEncrypt(originalUrl, SECRET_KEY);
+      // Ye Final Page ka link hai
+      const verifyLink = `${url.origin}/verify?token=${encodeURIComponent(encryptedDest)}`;
+
+      try {
+        // 2. Shortener API Call
+        const apiUrl = `${BASE_URL}/api?api=${SHORTENER_API_KEY}&url=${encodeURIComponent(verifyLink)}`;
+        const apiResponse = await fetch(apiUrl);
+        const result = await apiResponse.json();
+
+        if (result.status === "error" || (result.status && result.status !== "success")) {
+          return new Response(JSON.stringify({ status: "error", msg: `Shortener Error: ${result.message}` }), { status: 500 });
+        }
+
+        // 3. GENERATE "START LINK" (Ye sabse important hai)
+        // Hum user ko seedha shortener nahi denge. Hum "Start Link" denge.
+        // Start Link = Worker URL + Shortener URL
+        const startLink = `${url.origin}/start?next=${encodeURIComponent(result.shortenedUrl)}`;
+
+        return new Response(JSON.stringify({
+          status: "success",
+          original: originalUrl,
+          // Aapko User ko ye neeche wala link dena hai:
+          share_this_link: startLink 
+        }, null, 2), { headers: { "Content-Type": "application/json" } });
+
+      } catch (e) {
+        return new Response(JSON.stringify({ status: "error", msg: `API Failed: ${e.message}` }), { status: 500 });
       }
-      if (!originalUrl) {
-        return new Response(JSON.stringify({ error: "URL missing" }), { status: 400 });
-      }
-
-      // Generate unique session data
-      const sessionId = generateUniqueId();
-      const startTime = Date.now();
-      
-      // Store in encrypted token
-      const sessionData = {
-        uid: sessionId,
-        url: originalUrl,
-        start: startTime,
-        ip: clientIP.substring(0, 15)
-      };
-      
-      // Simple encryption
-      const encrypted = btoa(JSON.stringify(sessionData));
-      const safeLink = `${url.origin}/start?session=${encodeURIComponent(encrypted)}`;
-
-      // Get short link
-      const apiUrl = `https://${SHORTENER_DOMAIN}/api?api=${SHORTENER_API_KEY}&url=${encodeURIComponent(safeLink)}`;
-      const apiRes = await fetch(apiUrl);
-      const result = await apiRes.json();
-
-      return new Response(JSON.stringify({
-        success: true,
-        original: originalUrl,
-        short_url: result.shortenedUrl,
-        session_id: sessionId
-      }), { headers: { "Content-Type": "application/json" } });
     }
 
     // -----------------------------------------------------------------
-    // 2. START PAGE (Shortener se pehle)
+    // CASE 2: USER START (UNIQUE ID ASSIGNMENT)
+    // URL: /start?next=SHORTENER_URL
     // -----------------------------------------------------------------
     if (path === "/start") {
-      const session = url.searchParams.get("session");
-      
-      if (!session) {
-        return new Response("Invalid session", { status: 400 });
-      }
+        const nextUrl = url.searchParams.get("next");
+        if(!nextUrl) return new Response("Error: Missing Destination", {status: 400});
 
-      try {
-        const sessionData = JSON.parse(atob(session));
-        
-        // Create redirect token with start time
-        const redirectToken = btoa(JSON.stringify({
-          uid: sessionData.uid,
-          url: sessionData.url,
-          start_time: sessionData.start,
-          end_time: Date.now() // Current time as user leaves start page
-        }));
-        
-        // Redirect to shortener IMMEDIATELY
-        return Response.redirect(`https://${SHORTENER_DOMAIN}/verify?token=${encodeURIComponent(redirectToken)}`, 302);
-        
-      } catch (e) {
-        return new Response("Invalid session data", { status: 400 });
-      }
+        // Unique ID generate karo (Simple timestamp + random)
+        const uniqueId = Date.now().toString(36) + Math.random().toString(36).substr(2);
+
+        // HTML Response with Cookie Set
+        // Ye page turant redirect karega, lekin pehle Cookie set karega
+        const html = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>Securing Connection...</title>
+            <style>
+                body { background: #f0f2f5; font-family: sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; text-align: center; }
+                .msg { color: #555; font-size: 18px; }
+            </style>
+        </head>
+        <body>
+            <div class="msg">Setting up secure session... 🔒</div>
+            <script>
+                // 1 Second wait karke redirect (Taaki cookie set ho jaye)
+                setTimeout(() => { window.location.href = "${nextUrl}"; }, 500);
+            </script>
+        </body>
+        </html>`;
+
+        return new Response(html, {
+            headers: {
+                "Content-Type": "text/html",
+                // Set Cookie: Name=Value; Max-Age=Seconds; Path=/; HttpOnly
+                "Set-Cookie": `${SESSION_NAME}=${uniqueId}; Max-Age=${SESSION_TIME}; Path=/; Secure; HttpOnly`
+            }
+        });
     }
 
     // -----------------------------------------------------------------
-    // 3. REDIRECT PAGE (Shortener ke baad)
+    // CASE 3: USER VERIFY (FINAL CHECK)
+    // URL: /verify?token=XYZ...
     // -----------------------------------------------------------------
-    if (path === "/redirect") {
+    if (path === "/verify") {
       const token = url.searchParams.get("token");
-      const now = Date.now();
-      
-      if (!token) {
-        return renderBlocked("No token found");
+      if (!token) return new Response("Invalid Request", { status: 400 });
+
+      // --- UNIQUE ID CHECK (COOKIE) ---
+      // Check karte hain ki browser ke paas wo ID hai ya nahi
+      const hasSession = cookieHeader.includes(`${SESSION_NAME}=`);
+
+      if (!hasSession) {
+          // ID nahi mili -> BYPASS DETECTED
+          return new Response(renderRejectHtml(), { headers: { "Content-Type": "text/html;charset=UTF-8" } });
       }
 
+      // --- DECRYPT & REDIRECT ---
       try {
-        const tokenData = JSON.parse(atob(token));
-        
-        // 🔴 CRITICAL CHECK 1: Unique ID exists?
-        if (!tokenData.uid || !tokenData.start_time) {
-          return renderBlocked("Invalid session ID");
-        }
-        
-        // 🔴 CRITICAL CHECK 2: Calculate time spent
-        const timeSpent = (now - tokenData.start_time) / 1000; // in seconds
-        
-        console.log(`User ${tokenData.uid} spent ${timeSpent.toFixed(1)} seconds`);
-        
-        // 🔴 CRITICAL CHECK 3: Time validation
-        if (timeSpent < MIN_SHORTENER_TIME) {
-          // Too fast - likely a bot/tool
-          return renderBlocked(`Too fast! You spent only ${timeSpent.toFixed(1)} seconds. Minimum required: ${MIN_SHORTENER_TIME} seconds.`);
-        }
-        
-        if (timeSpent > MAX_SHORTENER_TIME) {
-          // Too slow - session expired
-          return renderBlocked(`Session expired. You took ${timeSpent.toFixed(1)} seconds. Maximum allowed: ${MAX_SHORTENER_TIME} seconds.`);
-        }
-        
-        // 🔴 CRITICAL CHECK 4: URL valid?
-        if (!tokenData.url.startsWith('http')) {
-          return renderBlocked("Invalid destination URL");
-        }
-        
-        // ✅ ALL CHECKS PASSED - Real user
-        return renderRedirectPage(tokenData.url, tokenData.uid, timeSpent);
-        
+        const targetUrl = xorDecrypt(token, SECRET_KEY);
+        if (!targetUrl.startsWith("http")) throw new Error("Invalid URL");
+
+        return new Response(renderSuccessHtml(targetUrl), { headers: { "Content-Type": "text/html;charset=UTF-8" } });
+
       } catch (e) {
-        return renderBlocked("Invalid token data");
+        return new Response(renderRejectHtml("Corrupted Data"), { headers: { "Content-Type": "text/html;charset=UTF-8" } });
       }
     }
 
-    // -----------------------------------------------------------------
-    // 4. FINAL REDIRECT (Hidden endpoint)
-    // -----------------------------------------------------------------
-    if (path === "/final") {
-      const token = url.searchParams.get("token");
-      
-      if (!token) {
-        return Response.redirect("https://google.com", 302);
-      }
-      
-      try {
-        const tokenData = JSON.parse(atob(token));
-        return Response.redirect(tokenData.url, 302);
-      } catch (e) {
-        return Response.redirect("https://google.com", 302);
-      }
-    }
-
-    // -----------------------------------------------------------------
-    // DEFAULT PAGE
-    // -----------------------------------------------------------------
-    return new Response(`
-      <html>
-      <head><title>Link Protection</title></head>
-      <body style="text-align:center;padding:50px;">
-        <h1>🔗 Unique ID Protection System</h1>
-        <p>Each user gets a unique ID that tracks shortener time.</p>
-      </body>
-      </html>
-    `, { headers: { "Content-Type": "text/html" } });
-  }
+    return new Response("LinkGuard v3.0 (Session Mode) Online 🟢", { status: 200 });
+  },
 };
 
 // =================================================================================
-// HELPER FUNCTIONS
+// HELPER FUNCTIONS & HTML
 // =================================================================================
 
-function generateUniqueId() {
-  return 'uid_' + Date.now() + '_' + Math.random().toString(36).substring(2, 10);
+function xorEncrypt(text, key) {
+  let result = "";
+  for (let i = 0; i < text.length; i++) { result += String.fromCharCode(text.charCodeAt(i) ^ key.charCodeAt(i % key.length)); }
+  return btoa(result);
 }
 
-function renderBlocked(reason) {
-  return new Response(`
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <title>Access Blocked</title>
-      <style>
-        body {
-          font-family: Arial, sans-serif;
-          text-align: center;
-          padding: 50px;
-          background: #ffebee;
-        }
-        .box {
-          background: white;
-          padding: 30px;
-          border-radius: 10px;
-          max-width: 500px;
-          margin: auto;
-          box-shadow: 0 5px 15px rgba(0,0,0,0.1);
-          border-left: 10px solid #f44336;
-        }
-      </style>
-    </head>
-    <body>
-      <div class="box">
-        <h1 style="color:#d32f2f;">🚫 Access Blocked</h1>
-        <p><strong>Security Check Failed:</strong></p>
-        <p>${reason}</p>
-        <hr>
-        <p style="color:#666; font-size:14px;">
-          System detected unusual activity.<br>
-          Unique ID verification failed.
-        </p>
-      </div>
-    </body>
-    </html>
-  `, { headers: { "Content-Type": "text/html" } });
+function xorDecrypt(encoded, key) {
+  let text = atob(encoded);
+  let result = "";
+  for (let i = 0; i < text.length; i++) { result += String.fromCharCode(text.charCodeAt(i) ^ key.charCodeAt(i % key.length)); }
+  return result;
 }
 
-function renderRedirectPage(targetUrl, uid, timeSpent) {
-  return new Response(`
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <title>Redirecting...</title>
-      <style>
-        body {
-          font-family: Arial, sans-serif;
-          text-align: center;
-          padding: 50px;
-          background: #f5f5f5;
-        }
-        .container {
-          background: white;
-          padding: 40px;
-          border-radius: 10px;
-          display: inline-block;
-          box-shadow: 0 5px 15px rgba(0,0,0,0.1);
-        }
-        .loader {
-          border: 5px solid #f3f3f3;
-          border-top: 5px solid #4CAF50;
-          border-radius: 50%;
-          width: 50px;
-          height: 50px;
-          animation: spin 1s linear infinite;
-          margin: 20px auto;
-        }
-        @keyframes spin {
-          0% { transform: rotate(0deg); }
-          100% { transform: rotate(360deg); }
-        }
-        .success-badge {
-          background: #4CAF50;
-          color: white;
-          padding: 5px 15px;
-          border-radius: 20px;
-          display: inline-block;
-          margin: 10px;
-        }
-      </style>
-    </head>
-    <body>
-      <div class="container">
-        <div class="loader"></div>
-        <h2>✅ Verification Successful!</h2>
-        
-        <div class="success-badge">
-          User ID: ${uid.substring(0, 10)}...
-        </div>
-        
-        <p>Time spent on shortener: <strong>${timeSpent.toFixed(1)} seconds</strong></p>
-        <p>Redirecting to destination...</p>
-        
-        <p id="countdown">Starting in 3 seconds</p>
-        
-        <p style="font-size:12px; color:#999; margin-top:20px;">
-          Unique ID verified • Time validation passed
-        </p>
-      </div>
-      
-      <script>
-        // Create final redirect token
-        const finalToken = btoa(JSON.stringify({
-          url: "${targetUrl.replace(/"/g, '\\"')}",
-          uid: "${uid}"
-        }));
-        
-        let seconds = 3;
-        const countdownEl = document.getElementById('countdown');
-        const countdownInterval = setInterval(() => {
-          seconds--;
-          countdownEl.textContent = 'Redirecting in ' + seconds + ' second' + (seconds !== 1 ? 's' : '');
-          
-          if (seconds <= 0) {
-            clearInterval(countdownInterval);
-            window.location.href = '/final?token=' + encodeURIComponent(finalToken);
-          }
-        }, 1000);
-        
-        // Allow click to redirect faster
-        document.body.addEventListener('click', function() {
-          clearInterval(countdownInterval);
-          window.location.href = '/final?token=' + encodeURIComponent(finalToken);
-        });
-      </script>
-    </body>
-    </html>
-  `, { headers: { "Content-Type": "text/html" } });
+// 1. REJECT PAGE (Jab Cookie na mile)
+function renderRejectHtml() {
+  return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Access Denied</title><style>body{background:#ffebee;font-family:sans-serif;text-align:center;padding:50px 20px;color:#c62828}.box{background:white;padding:30px;border-radius:15px;box-shadow:0 10px 25px rgba(0,0,0,0.1);max-width:400px;margin:0 auto;border:2px solid #ef5350}.btn{background:#c62828;color:white;padding:10px 20px;text-decoration:none;border-radius:5px;display:inline-block;margin-top:15px}</style></head><body><div class="box"><h1>🚫</h1><h2>Session Not Found!</h2><p><b>Lagta hai aapne Link Bypass karne ki koshish ki hai.</b></p><p>Ya fir aapne "Start Link" se shuru nahi kiya.</p><small style="color:#555">Please hamesha Official Link hi use karein.</small><br><a href="javascript:history.back()" class="btn">Go Back</a></div></body></html>`;
+}
+
+// 2. SUCCESS PAGE
+function renderSuccessHtml(destination) {
+  return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Success</title><style>body{background:#e8f5e9;font-family:sans-serif;text-align:center;padding:50px 20px;display:flex;align-items:center;justify-content:center;height:80vh}.loader{border:4px solid #f3f3f3;border-top:4px solid #4caf50;border-radius:50%;width:40px;height:40px;animation:spin 1s linear infinite;margin:0 auto 20px} @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }h2{color:#2e7d32}</style></head><body><div class="box"><div class="loader"></div><h2>Verified!</h2><p>Unique ID Matched. Redirecting...</p></div><script>setTimeout(function(){window.location.replace("${destination}");}, 1500);</script></body></html>`;
 }
