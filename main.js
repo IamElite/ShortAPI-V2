@@ -1,5 +1,6 @@
 // =================================================================================
-// PURE BACKEND PROTECTION - FRONTEND SIMPLE, LOGIC BACKEND MEIN
+// UNIQUE ID + TIME TRACKING SYSTEM
+// Real users ke liye simple, Bots ke liye block
 // =================================================================================
 
 const ADMIN_PASSWORD = "MY_SECRET_PASS_123";
@@ -7,20 +8,19 @@ const ENCRYPTION_KEY = "SUPER_SECRET_KEY_XY"; // 32 characters
 const SHORTENER_DOMAIN = 'nanolinks.in';
 const SHORTENER_API_KEY = 'ae0271c2c57105db2fa209f5b0f20c1a965343f6';
 
-// In-memory rate limiting (resets on worker restart)
-let requestTracker = new Map();
+// Minimum time user should spend on shortener (seconds)
+const MIN_SHORTENER_TIME = 15; // 15 seconds minimum
+const MAX_SHORTENER_TIME = 300; // 5 minutes maximum
 
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     const path = url.pathname;
     const headers = request.headers;
-    const clientIP = headers.get('CF-Connecting-IP') || 'unknown';
-    const userAgent = headers.get('User-Agent') || '';
-    const referer = headers.get('Referer') || '';
+    const clientIP = headers.get('CF-Connecting-IP') || '';
 
     // -----------------------------------------------------------------
-    // 1. ADMIN LINK GENERATE (SAME)
+    // 1. ADMIN LINK GENERATE
     // -----------------------------------------------------------------
     if (path === "/encrypt") {
       const originalUrl = url.searchParams.get("url");
@@ -33,20 +33,21 @@ export default {
         return new Response(JSON.stringify({ error: "URL missing" }), { status: 400 });
       }
 
-      // Create encrypted token with timestamp
-      const timestamp = Date.now();
-      const tokenData = {
+      // Generate unique session data
+      const sessionId = generateUniqueId();
+      const startTime = Date.now();
+      
+      // Store in encrypted token
+      const sessionData = {
+        uid: sessionId,
         url: originalUrl,
-        ts: timestamp,
-        src: 'direct' // Will change when coming from shortener
+        start: startTime,
+        ip: clientIP.substring(0, 15)
       };
       
-      const encrypted = btoa(JSON.stringify(tokenData))
-        .split('').reverse().join('') 
-        + '.' 
-        + btoa(timestamp.toString());
-      
-      const safeLink = `${url.origin}/redirect?token=${encodeURIComponent(encrypted)}`;
+      // Simple encryption
+      const encrypted = btoa(JSON.stringify(sessionData));
+      const safeLink = `${url.origin}/start?session=${encodeURIComponent(encrypted)}`;
 
       // Get short link
       const apiUrl = `https://${SHORTENER_DOMAIN}/api?api=${SHORTENER_API_KEY}&url=${encodeURIComponent(safeLink)}`;
@@ -57,105 +58,100 @@ export default {
         success: true,
         original: originalUrl,
         short_url: result.shortenedUrl,
-        note: "User MUST visit through shortener"
+        session_id: sessionId
       }), { headers: { "Content-Type": "application/json" } });
     }
 
     // -----------------------------------------------------------------
-    // 2. USER REDIRECT (MAIN LOGIC - BACKEND MEIN SAB KUCH)
+    // 2. START PAGE (Shortener se pehle)
     // -----------------------------------------------------------------
-    if (path === "/redirect") {
-      const token = url.searchParams.get("token");
-      const now = Date.now();
-
-      // 🔴 BACKEND CHECK 1: Token present?
-      if (!token) {
-        return renderBlocked("No token provided");
+    if (path === "/start") {
+      const session = url.searchParams.get("session");
+      
+      if (!session) {
+        return new Response("Invalid session", { status: 400 });
       }
-
-      // 🔴 BACKEND CHECK 2: Rate limiting
-      const ipKey = `ip_${clientIP}`;
-      const ipCount = requestTracker.get(ipKey) || 0;
-      if (ipCount > 10) { // 10 requests per IP
-        return renderBlocked("Too many requests");
-      }
-      requestTracker.set(ipKey, ipCount + 1);
 
       try {
-        // Decode token
-        const [encodedData, encodedTs] = token.split('.');
-        const decodedData = JSON.parse(atob(encodedData.split('').reverse().join('')));
-        const tokenTime = parseInt(atob(encodedTs));
+        const sessionData = JSON.parse(atob(session));
         
-        // 🔴 BACKEND CHECK 3: Token expired? (30 seconds max)
-        if (now - tokenTime > 30000) {
-          return renderBlocked("Link expired (30 second limit)");
-        }
-
-        // 🔴 BACKEND CHECK 4: Coming from shortener?
-        // REAL users will have src='shortener', direct access will have src='direct'
-        const isFromShortener = referer.includes(SHORTENER_DOMAIN) || 
-                               decodedData.src === 'shortener';
+        // Create redirect token with start time
+        const redirectToken = btoa(JSON.stringify({
+          uid: sessionData.uid,
+          url: sessionData.url,
+          start_time: sessionData.start,
+          end_time: Date.now() // Current time as user leaves start page
+        }));
         
-        if (!isFromShortener && decodedData.src !== 'shortener') {
-          // This is a DIRECT ACCESS attempt (bypass)
-          // But let's give them a CHANCE - update token to mark as bypass attempt
-          decodedData.src = 'bypass_attempt';
-          decodedData.attempt_time = now;
-          
-          // Create new token with bypass mark
-          const newToken = btoa(JSON.stringify(decodedData))
-            .split('').reverse().join('') 
-            + '.' 
-            + btoa(now.toString());
-          
-          // 🔴 BACKEND CHECK 5: Detect automation tools
-          const isAutomationTool = detectAutomation(userAgent, headers);
-          
-          if (isAutomationTool) {
-            return renderBlocked("Automation tools detected");
-          }
-          
-          // Show redirect page but with tracking
-          return renderRedirectPage(decodedData.url, newToken, true);
-        }
-
-        // 🔴 BACKEND CHECK 6: Valid URL?
-        if (!decodedData.url.startsWith('http')) {
-          return renderBlocked("Invalid destination URL");
-        }
-
-        // ✅ ALL CHECKS PASSED - Real user from shortener
-        // Show simple redirect page
-        return renderRedirectPage(decodedData.url, token, false);
-
+        // Redirect to shortener IMMEDIATELY
+        return Response.redirect(`https://${SHORTENER_DOMAIN}/verify?token=${encodeURIComponent(redirectToken)}`, 302);
+        
       } catch (e) {
-        // 🔴 BACKEND CHECK 7: Token tampering
-        return renderBlocked("Invalid security token");
+        return new Response("Invalid session data", { status: 400 });
       }
     }
 
     // -----------------------------------------------------------------
-    // 3. FINAL REDIRECT ENDPOINT (Hidden from users)
+    // 3. REDIRECT PAGE (Shortener ke baad)
     // -----------------------------------------------------------------
-    if (path === "/final-redirect") {
+    if (path === "/redirect") {
       const token = url.searchParams.get("token");
+      const now = Date.now();
       
-      if (!token) return Response.redirect("https://google.com", 302);
-      
+      if (!token) {
+        return renderBlocked("No token found");
+      }
+
       try {
-        const [encodedData, encodedTs] = token.split('.');
-        const decodedData = JSON.parse(atob(encodedData.split('').reverse().join('')));
+        const tokenData = JSON.parse(atob(token));
         
-        // Last check: if marked as bypass attempt and recent
-        if (decodedData.src === 'bypass_attempt') {
-          const attemptTime = decodedData.attempt_time || 0;
-          if (Date.now() - attemptTime < 5000) { // Within 5 seconds
-            return renderBlocked("Security check failed");
-          }
+        // 🔴 CRITICAL CHECK 1: Unique ID exists?
+        if (!tokenData.uid || !tokenData.start_time) {
+          return renderBlocked("Invalid session ID");
         }
         
-        return Response.redirect(decodedData.url, 302);
+        // 🔴 CRITICAL CHECK 2: Calculate time spent
+        const timeSpent = (now - tokenData.start_time) / 1000; // in seconds
+        
+        console.log(`User ${tokenData.uid} spent ${timeSpent.toFixed(1)} seconds`);
+        
+        // 🔴 CRITICAL CHECK 3: Time validation
+        if (timeSpent < MIN_SHORTENER_TIME) {
+          // Too fast - likely a bot/tool
+          return renderBlocked(`Too fast! You spent only ${timeSpent.toFixed(1)} seconds. Minimum required: ${MIN_SHORTENER_TIME} seconds.`);
+        }
+        
+        if (timeSpent > MAX_SHORTENER_TIME) {
+          // Too slow - session expired
+          return renderBlocked(`Session expired. You took ${timeSpent.toFixed(1)} seconds. Maximum allowed: ${MAX_SHORTENER_TIME} seconds.`);
+        }
+        
+        // 🔴 CRITICAL CHECK 4: URL valid?
+        if (!tokenData.url.startsWith('http')) {
+          return renderBlocked("Invalid destination URL");
+        }
+        
+        // ✅ ALL CHECKS PASSED - Real user
+        return renderRedirectPage(tokenData.url, tokenData.uid, timeSpent);
+        
+      } catch (e) {
+        return renderBlocked("Invalid token data");
+      }
+    }
+
+    // -----------------------------------------------------------------
+    // 4. FINAL REDIRECT (Hidden endpoint)
+    // -----------------------------------------------------------------
+    if (path === "/final") {
+      const token = url.searchParams.get("token");
+      
+      if (!token) {
+        return Response.redirect("https://google.com", 302);
+      }
+      
+      try {
+        const tokenData = JSON.parse(atob(token));
+        return Response.redirect(tokenData.url, 302);
       } catch (e) {
         return Response.redirect("https://google.com", 302);
       }
@@ -165,52 +161,31 @@ export default {
     // DEFAULT PAGE
     // -----------------------------------------------------------------
     return new Response(`
-      <html><body style="text-align:center;padding:50px;">
-        <h1>Link Protection Active</h1>
-        <p>Backend protection system running.</p>
-      </body></html>
+      <html>
+      <head><title>Link Protection</title></head>
+      <body style="text-align:center;padding:50px;">
+        <h1>🔗 Unique ID Protection System</h1>
+        <p>Each user gets a unique ID that tracks shortener time.</p>
+      </body>
+      </html>
     `, { headers: { "Content-Type": "text/html" } });
   }
 };
 
 // =================================================================================
-// BACKEND DETECTION FUNCTIONS
+// HELPER FUNCTIONS
 // =================================================================================
 
-function detectAutomation(userAgent, headers) {
-  const ua = userAgent.toLowerCase();
-  
-  // Common automation tools
-  const automationMarkers = [
-    'phantom', 'selenium', 'webdriver', 'headless',
-    'puppeteer', 'playwright', 'curl/', 'wget/',
-    'python-requests', 'java/', 'bot', 'crawler',
-    'scraper', 'automation', 'bypass-all-shortlinks'
-  ];
-  
-  for (const marker of automationMarkers) {
-    if (ua.includes(marker)) return true;
-  }
-  
-  // Check for automation headers
-  if (headers.get('X-Selenium')) return true;
-  if (headers.get('X-WebDriver')) return true;
-  if (headers.get('X-Requested-With') === 'XMLHttpRequest' && 
-      !headers.get('Referer')) return true;
-  
-  return false;
+function generateUniqueId() {
+  return 'uid_' + Date.now() + '_' + Math.random().toString(36).substring(2, 10);
 }
-
-// =================================================================================
-// RENDER FUNCTIONS
-// =================================================================================
 
 function renderBlocked(reason) {
   return new Response(`
     <!DOCTYPE html>
     <html>
     <head>
-      <title>Access Restricted</title>
+      <title>Access Blocked</title>
       <style>
         body {
           font-family: Arial, sans-serif;
@@ -225,17 +200,19 @@ function renderBlocked(reason) {
           max-width: 500px;
           margin: auto;
           box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+          border-left: 10px solid #f44336;
         }
       </style>
     </head>
     <body>
       <div class="box">
-        <h1 style="color:#d32f2f;">🚫 Access Restricted</h1>
-        <p><strong>Reason:</strong> ${reason}</p>
-        <p>Our security system has blocked this request.</p>
+        <h1 style="color:#d32f2f;">🚫 Access Blocked</h1>
+        <p><strong>Security Check Failed:</strong></p>
+        <p>${reason}</p>
         <hr>
-        <p style="font-size:12px; color:#666;">
-          IP logged • ${new Date().toLocaleTimeString()}
+        <p style="color:#666; font-size:14px;">
+          System detected unusual activity.<br>
+          Unique ID verification failed.
         </p>
       </div>
     </body>
@@ -243,12 +220,7 @@ function renderBlocked(reason) {
   `, { headers: { "Content-Type": "text/html" } });
 }
 
-function renderRedirectPage(targetUrl, token, isSuspicious = false) {
-  // For REAL users: simple redirect page
-  // For suspicious: redirect but with tracking
-  
-  const redirectDelay = isSuspicious ? 5000 : 2000; // 5 sec for suspicious, 2 sec for real
-  
+function renderRedirectPage(targetUrl, uid, timeSpent) {
   return new Response(`
     <!DOCTYPE html>
     <html>
@@ -281,39 +253,43 @@ function renderRedirectPage(targetUrl, token, isSuspicious = false) {
           0% { transform: rotate(0deg); }
           100% { transform: rotate(360deg); }
         }
-        ${isSuspicious ? `
-        .warning {
-          background: #fff3cd;
-          border: 1px solid #ffeaa7;
-          padding: 10px;
-          border-radius: 5px;
-          margin: 15px 0;
-          color: #856404;
+        .success-badge {
+          background: #4CAF50;
+          color: white;
+          padding: 5px 15px;
+          border-radius: 20px;
+          display: inline-block;
+          margin: 10px;
         }
-        ` : ''}
       </style>
     </head>
     <body>
       <div class="container">
         <div class="loader"></div>
-        <h2>Redirecting to destination...</h2>
-        <p>Please wait a moment.</p>
+        <h2>✅ Verification Successful!</h2>
         
-        ${isSuspicious ? `
-        <div class="warning">
-          ⚠️ Security verification in progress...
+        <div class="success-badge">
+          User ID: ${uid.substring(0, 10)}...
         </div>
-        ` : ''}
         
-        <p id="countdown">Starting in ${redirectDelay/1000} seconds</p>
+        <p>Time spent on shortener: <strong>${timeSpent.toFixed(1)} seconds</strong></p>
+        <p>Redirecting to destination...</p>
+        
+        <p id="countdown">Starting in 3 seconds</p>
         
         <p style="font-size:12px; color:#999; margin-top:20px;">
-          Protected by LinkGuard • Backend Security v2.0
+          Unique ID verified • Time validation passed
         </p>
       </div>
       
       <script>
-        let seconds = ${redirectDelay/1000};
+        // Create final redirect token
+        const finalToken = btoa(JSON.stringify({
+          url: "${targetUrl.replace(/"/g, '\\"')}",
+          uid: "${uid}"
+        }));
+        
+        let seconds = 3;
         const countdownEl = document.getElementById('countdown');
         const countdownInterval = setInterval(() => {
           seconds--;
@@ -321,15 +297,14 @@ function renderRedirectPage(targetUrl, token, isSuspicious = false) {
           
           if (seconds <= 0) {
             clearInterval(countdownInterval);
-            // Use hidden endpoint for final redirect
-            window.location.href = '/final-redirect?token=${encodeURIComponent(token)}';
+            window.location.href = '/final?token=' + encodeURIComponent(finalToken);
           }
         }, 1000);
         
-        // Allow click to redirect faster (human behavior)
+        // Allow click to redirect faster
         document.body.addEventListener('click', function() {
           clearInterval(countdownInterval);
-          window.location.href = '/final-redirect?token=${encodeURIComponent(token)}';
+          window.location.href = '/final?token=' + encodeURIComponent(finalToken);
         });
       </script>
     </body>
